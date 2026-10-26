@@ -1,14 +1,14 @@
-package xiaozhi
+package gateway
 
 // ToolDefinitions returns the MCP tool descriptors advertised in tools/list.
 // Descriptions are written for the LLM: they tell it when to use each tool
-// and how to phrase results for a voice user.
+// and how to phrase results for the user, voice or text.
 func ToolDefinitions() []map[string]any {
 	return []map[string]any{
 		{
 			"name": "mesh_get_new_messages",
 			"description": "Read new unread messages received over the MeshCore LoRa mesh radio since the previous call. " +
-				"Returns a short numbered list of private (dm) and channel messages. " +
+				"Returns a numbered list of private (dm) and channel messages. " +
 				"Call repeatedly to page through a large batch. Use before replying to see the conversation.",
 			"inputSchema": map[string]any{
 				"type":       "object",

@@ -1,10 +1,11 @@
-package xiaozhi
+package gateway
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 
@@ -21,11 +22,16 @@ func voiceFit() fit.Options {
 }
 
 func newTestServer(mesh Mesh) *Server {
-	return NewServer(mesh, 0, voiceFit(), testLogger())
+	return NewServer(mesh, ServerOptions{Fit: voiceFit()}, testLogger())
 }
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// initializeFrame is the JSON-RPC initialize a client sends first.
+func initializeFrame(client string) []byte {
+	return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":%q,"version":"test"}}}`, client))
 }
 
 // fakeMesh records calls and serves canned data.
@@ -91,7 +97,8 @@ func (f *fakeMesh) Channels() []ChannelRef {
 
 func TestProtocolInitializeEchoesVersion(t *testing.T) {
 	s := newTestServer(&fakeMesh{})
-	out := s.HandleMessage([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`))
+	conn := s.NewConn()
+	out := conn.Handle([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}`))
 
 	var resp struct {
 		ID     int `json:"id"`
@@ -109,14 +116,16 @@ func TestProtocolInitializeEchoesVersion(t *testing.T) {
 
 func TestProtocolNotificationGetsNoResponse(t *testing.T) {
 	s := newTestServer(&fakeMesh{})
-	if out := s.HandleMessage([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)); out != nil {
+	conn := s.NewConn()
+	if out := conn.Handle([]byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)); out != nil {
 		t.Errorf("notification produced a response: %s", out)
 	}
 }
 
 func TestToolsListAdvertisesAllTools(t *testing.T) {
 	s := newTestServer(&fakeMesh{})
-	out := s.HandleMessage([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
+	conn := s.NewConn()
+	out := conn.Handle([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`))
 
 	var resp struct {
 		Result struct {
@@ -154,25 +163,28 @@ func twelveMessages() []companion.Message {
 }
 
 func TestToolGetMessagesPagesThroughCursor(t *testing.T) {
-	mesh := &fakeMesh{msgs: twelveMessages()}
+	mesh := &fakeMesh{}
 	s := newTestServer(mesh)
+	conn := s.NewConn() // cursor primed at "now" — messages arriving afterwards are new
+	mesh.msgs = twelveMessages()
 
 	// First call: capped at 10, cursor advances to the last SHOWN message.
-	first := resultText(t, callTool(t, s, "mesh_get_new_messages", nil))
+	first := resultText(t, callTool(t, conn, "mesh_get_new_messages", nil))
 	if !contains(first, "10 new mesh") || !contains(first, "2 more") {
 		t.Errorf("first call should show 10 and announce 2 more:\n%s", first)
 	}
 	// Second call: pages through the rest.
-	second := resultText(t, callTool(t, s, "mesh_get_new_messages", nil))
+	second := resultText(t, callTool(t, conn, "mesh_get_new_messages", nil))
 	if !contains(second, "2 new mesh") {
 		t.Errorf("second call should show the remaining 2:\n%s", second)
 	}
 	// Third: everything read.
-	third := resultText(t, callTool(t, s, "mesh_get_new_messages", nil))
+	third := resultText(t, callTool(t, conn, "mesh_get_new_messages", nil))
 	if third != "No new mesh messages." {
 		t.Errorf("third call = %q, want no new messages", third)
 	}
-	wantQueries := []int64{0, 10, 12}
+	// The first query is the MaxInt64 "now" probe from NewConn.
+	wantQueries := []int64{math.MaxInt64, 0, 10, 12}
 	if len(mesh.queries) != len(wantQueries) {
 		t.Fatalf("gateway queries = %v, want %v", mesh.queries, wantQueries)
 	}
@@ -183,14 +195,73 @@ func TestToolGetMessagesPagesThroughCursor(t *testing.T) {
 	}
 }
 
+// TestConnCursorsAreIndependent checks that two clients reading do not
+// consume each other's messages: each Conn has its own cursor.
+func TestConnCursorsAreIndependent(t *testing.T) {
+	mesh := &fakeMesh{}
+	s := newTestServer(mesh)
+	a := s.NewConn()
+	b := s.NewConn()
+	a.Handle(initializeFrame("agent-a"))
+	b.Handle(initializeFrame("agent-b"))
+	mesh.msgs = twelveMessages()
+
+	// a reads everything; b must still see the full batch afterwards.
+	if got := resultText(t, callTool(t, a, "mesh_get_new_messages", nil)); !contains(got, "10 new mesh") {
+		t.Errorf("first client first call = %q", got)
+	}
+	if got := resultText(t, callTool(t, a, "mesh_get_new_messages", nil)); !contains(got, "2 new mesh") {
+		t.Errorf("first client second call = %q", got)
+	}
+	if got := resultText(t, callTool(t, b, "mesh_get_new_messages", nil)); !contains(got, "10 new mesh") {
+		t.Errorf("second client should have its own cursor, got %q", got)
+	}
+}
+
+// TestConnCursorResumesAcrossReconnect checks that a client that sends
+// initialize again (WebSocket reconnect, new HTTP session) resumes its saved
+// cursor instead of replaying or losing messages, while an unknown client
+// still starts at "now".
+func TestConnCursorResumesAcrossReconnect(t *testing.T) {
+	mesh := &fakeMesh{}
+	s := newTestServer(mesh)
+	first := s.NewConn()
+	first.Handle(initializeFrame("hermes"))
+	mesh.msgs = []companion.Message{
+		{ID: 1, Type: "dm", Sender: "S", Text: "one"},
+		{ID: 2, Type: "dm", Sender: "S", Text: "two"},
+	}
+	if got := resultText(t, callTool(t, first, "mesh_get_new_messages", nil)); !contains(got, "2 new mesh") {
+		t.Fatalf("first read = %q", got)
+	}
+
+	mesh.msgs = append(mesh.msgs, companion.Message{ID: 3, Type: "dm", Sender: "S", Text: "three"})
+
+	// Reconnect as the same client: cursor resumes at 2 → only message 3.
+	resumed := s.NewConn() // starts at "now" (3)…
+	resumed.Handle(initializeFrame("hermes"))
+	if got := resultText(t, callTool(t, resumed, "mesh_get_new_messages", nil)); !contains(got, "three") || !contains(got, "1 new mesh") {
+		t.Errorf("resumed client should see only message 3, got %q", got)
+	}
+
+	// A client never seen before starts at "now": nothing replayed.
+	fresh := s.NewConn()
+	fresh.Handle(initializeFrame("nanobot"))
+	if got := resultText(t, callTool(t, fresh, "mesh_get_new_messages", nil)); got != "No new mesh messages." {
+		t.Errorf("fresh client should start at now, got %q", got)
+	}
+}
+
 func TestToolGetMessagesFormatsDMAndChannel(t *testing.T) {
-	mesh := &fakeMesh{msgs: []companion.Message{
+	mesh := &fakeMesh{}
+	s := newTestServer(mesh)
+	conn := s.NewConn() // conn first: messages seeded afterwards are "new"
+	mesh.msgs = []companion.Message{
 		{ID: 1, Type: "dm", Sender: "Короед", Text: "hello"},
 		{ID: 2, Type: "channel", Channel: "public", Sender: "Wire", Text: "hi all"},
-	}}
-	s := newTestServer(mesh)
+	}
 
-	text := resultText(t, callTool(t, s, "mesh_get_new_messages", nil))
+	text := resultText(t, callTool(t, conn, "mesh_get_new_messages", nil))
 	for _, want := range []string{`Private from Короед: "hello"`, `Channel public from Wire: "hi all"`} {
 		if !contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)
@@ -198,11 +269,25 @@ func TestToolGetMessagesFormatsDMAndChannel(t *testing.T) {
 	}
 }
 
+func TestToolGetMessagesTruncatesPerOutputSetting(t *testing.T) {
+	mesh := &fakeMesh{}
+	s := NewServer(mesh, ServerOptions{Fit: voiceFit(), MaxMessageRunes: 40}, testLogger())
+	conn := s.NewConn()
+	mesh.msgs = []companion.Message{
+		{ID: 1, Type: "dm", Sender: "S", Text: strings.Repeat("x", 500)},
+	}
+	text := resultText(t, callTool(t, conn, "mesh_get_new_messages", nil))
+	if !contains(text, strings.Repeat("x", 40)+"…") || contains(text, strings.Repeat("x", 41)) {
+		t.Errorf("message should be truncated to 40 runes + ellipsis:\n%s", text)
+	}
+}
+
 func TestToolSendMapsOutcomes(t *testing.T) {
 	t.Run("sent", func(t *testing.T) {
 		mesh := &fakeMesh{}
 		s := newTestServer(mesh)
-		out := callTool(t, s, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": "hi"})
+		conn := s.NewConn()
+		out := callTool(t, conn, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": "hi"})
 		if tr := resultTool(t, out); tr.IsError || !contains(resultText(t, out), "sent to Короед") {
 			t.Errorf("unexpected result: %+v", out)
 		}
@@ -214,7 +299,8 @@ func TestToolSendMapsOutcomes(t *testing.T) {
 	t.Run("unknown recipient hints at directories", func(t *testing.T) {
 		mesh := &fakeMesh{dmErr: ErrUnknownRecipient}
 		s := newTestServer(mesh)
-		out := callTool(t, s, "mesh_send_message", map[string]any{"type": "dm", "to": "ghost", "text": "hi"})
+		conn := s.NewConn()
+		out := callTool(t, conn, "mesh_send_message", map[string]any{"type": "dm", "to": "ghost", "text": "hi"})
 		if tr := resultTool(t, out); !tr.IsError || !contains(resultText(t, out), "not found") || !contains(resultText(t, out), "mesh_list_contacts") {
 			t.Errorf("unexpected result: %+v", out)
 		}
@@ -223,7 +309,8 @@ func TestToolSendMapsOutcomes(t *testing.T) {
 	t.Run("ambiguous name asks the user to disambiguate", func(t *testing.T) {
 		mesh := &fakeMesh{dmErr: &meshcore.AmbiguousMatchError{Names: []string{"Yorick Hamlet", "Yorick 💀"}}}
 		s := newTestServer(mesh)
-		out := callTool(t, s, "mesh_send_message", map[string]any{"type": "dm", "to": "Yorick", "text": "hi"})
+		conn := s.NewConn()
+		out := callTool(t, conn, "mesh_send_message", map[string]any{"type": "dm", "to": "Yorick", "text": "hi"})
 		text := resultText(t, out)
 		if tr := resultTool(t, out); !tr.IsError || !contains(text, "Several recipients match") ||
 			!contains(text, "Yorick Hamlet") || !contains(text, "full name") {
@@ -234,7 +321,8 @@ func TestToolSendMapsOutcomes(t *testing.T) {
 	t.Run("no confirmation is not a hard failure", func(t *testing.T) {
 		mesh := &fakeMesh{chErr: meshcore.ErrNoConfirmation}
 		s := newTestServer(mesh)
-		out := callTool(t, s, "mesh_send_message", map[string]any{"type": "channel", "to": "public", "text": "hi"})
+		conn := s.NewConn()
+		out := callTool(t, conn, "mesh_send_message", map[string]any{"type": "channel", "to": "public", "text": "hi"})
 		if tr := resultTool(t, out); !tr.IsError || !contains(resultText(t, out), "may still arrive") {
 			t.Errorf("unexpected result: %+v", out)
 		}
@@ -243,7 +331,8 @@ func TestToolSendMapsOutcomes(t *testing.T) {
 	t.Run("device rejection", func(t *testing.T) {
 		mesh := &fakeMesh{dmErr: meshcore.ErrDeviceRejected}
 		s := newTestServer(mesh)
-		out := callTool(t, s, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": "hi"})
+		conn := s.NewConn()
+		out := callTool(t, conn, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": "hi"})
 		if tr := resultTool(t, out); !tr.IsError || !contains(resultText(t, out), "rejected") {
 			t.Errorf("unexpected result: %+v", out)
 		}
@@ -252,12 +341,13 @@ func TestToolSendMapsOutcomes(t *testing.T) {
 	t.Run("validation errors", func(t *testing.T) {
 		mesh := &fakeMesh{}
 		s := newTestServer(mesh)
+		conn := s.NewConn()
 		for _, args := range []map[string]any{
 			{"type": "dm", "to": "", "text": "hi"},
 			{"type": "dm", "to": "x", "text": " "},
 			{"type": "sms", "to": "x", "text": "hi"},
 		} {
-			out := callTool(t, s, "mesh_send_message", args)
+			out := callTool(t, conn, "mesh_send_message", args)
 			if tr := resultTool(t, out); !tr.IsError {
 				t.Errorf("args %v should fail validation: %+v", args, out)
 			}
@@ -273,8 +363,9 @@ func TestToolSendShrink(t *testing.T) {
 	t.Run("long message splits into parts", func(t *testing.T) {
 		mesh := &fakeMesh{}
 		s := newTestServer(mesh)
+		conn := s.NewConn()
 		long := strings.Repeat("это длинное сообщение для рации ", 10) // ~320 bytes
-		out := callTool(t, s, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": long})
+		out := callTool(t, conn, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": long})
 		text := resultText(t, out)
 
 		if len(mesh.dmCalls) < 2 {
@@ -298,7 +389,8 @@ func TestToolSendShrink(t *testing.T) {
 	t.Run("short message is a single send", func(t *testing.T) {
 		mesh := &fakeMesh{}
 		s := newTestServer(mesh)
-		callTool(t, s, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": "привет"})
+		conn := s.NewConn()
+		callTool(t, conn, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": "привет"})
 		if len(mesh.dmCalls) != 1 || mesh.dmCalls[0][1] != "привет" {
 			t.Errorf("unexpected sends: %v", mesh.dmCalls)
 		}
@@ -309,8 +401,9 @@ func TestToolSendShrink(t *testing.T) {
 		mesh := &fakeMesh{}
 		o := voiceFit()
 		o.CyrToLat = true
-		s := NewServer(mesh, 0, o, testLogger())
-		callTool(t, s, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": "привет"})
+		s := NewServer(mesh, ServerOptions{Fit: o}, testLogger())
+		conn := s.NewConn()
+		callTool(t, conn, "mesh_send_message", map[string]any{"type": "dm", "to": "Короед", "text": "привет"})
 		// Homoglyphs: Cyrillic р→Latin p, Cyrillic е→Latin e.
 		if len(mesh.dmCalls) != 1 || mesh.dmCalls[0][1] != "пpивeт" {
 			t.Errorf("expected homoglyph squeeze, got: %v", mesh.dmCalls)
@@ -320,11 +413,12 @@ func TestToolSendShrink(t *testing.T) {
 
 func TestToolListContactsAndChannels(t *testing.T) {
 	s := newTestServer(&fakeMesh{})
+	conn := s.NewConn()
 
-	if text := resultText(t, callTool(t, s, "mesh_list_contacts", nil)); !contains(text, "Короед") || !contains(text, "Wire") {
+	if text := resultText(t, callTool(t, conn, "mesh_list_contacts", nil)); !contains(text, "Короед") || !contains(text, "Wire") {
 		t.Errorf("mesh_list_contacts = %q", text)
 	}
-	if text := resultText(t, callTool(t, s, "mesh_list_channels", nil)); !contains(text, "public (index 0)") {
+	if text := resultText(t, callTool(t, conn, "mesh_list_channels", nil)); !contains(text, "public (index 0)") {
 		t.Errorf("mesh_list_channels = %q", text)
 	}
 }
@@ -333,7 +427,8 @@ func TestToolSearchContacts(t *testing.T) {
 	t.Run("matches are listed with the query", func(t *testing.T) {
 		mesh := &fakeMesh{searchNames: []string{"Yorick Hamlet", "Yorick 💀"}}
 		s := newTestServer(mesh)
-		text := resultText(t, callTool(t, s, "mesh_search_contacts", map[string]any{"query": "yorick"}))
+		conn := s.NewConn()
+		text := resultText(t, callTool(t, conn, "mesh_search_contacts", map[string]any{"query": "yorick"}))
 		if !contains(text, `2 contacts match "yorick"`) || !contains(text, "Yorick Hamlet") || !contains(text, "Yorick 💀") {
 			t.Errorf("unexpected result: %q", text)
 		}
@@ -345,7 +440,8 @@ func TestToolSearchContacts(t *testing.T) {
 	t.Run("singular wording for one match", func(t *testing.T) {
 		mesh := &fakeMesh{searchNames: []string{"Yorick 💀"}}
 		s := newTestServer(mesh)
-		text := resultText(t, callTool(t, s, "mesh_search_contacts", map[string]any{"query": "yorick"}))
+		conn := s.NewConn()
+		text := resultText(t, callTool(t, conn, "mesh_search_contacts", map[string]any{"query": "yorick"}))
 		if !contains(text, `1 contact matches "yorick"`) {
 			t.Errorf("unexpected result: %q", text)
 		}
@@ -353,7 +449,8 @@ func TestToolSearchContacts(t *testing.T) {
 
 	t.Run("no matches", func(t *testing.T) {
 		s := newTestServer(&fakeMesh{})
-		text := resultText(t, callTool(t, s, "mesh_search_contacts", map[string]any{"query": "ghost"}))
+		conn := s.NewConn()
+		text := resultText(t, callTool(t, conn, "mesh_search_contacts", map[string]any{"query": "ghost"}))
 		if !contains(text, `No contacts match "ghost"`) {
 			t.Errorf("unexpected result: %q", text)
 		}
@@ -362,7 +459,8 @@ func TestToolSearchContacts(t *testing.T) {
 	t.Run("empty query is an error result", func(t *testing.T) {
 		mesh := &fakeMesh{}
 		s := newTestServer(mesh)
-		out := callTool(t, s, "mesh_search_contacts", map[string]any{"query": "   "})
+		conn := s.NewConn()
+		out := callTool(t, conn, "mesh_search_contacts", map[string]any{"query": "   "})
 		if tr := resultTool(t, out); !tr.IsError {
 			t.Errorf("empty query should be isError=true: %+v", out)
 		}
@@ -374,21 +472,22 @@ func TestToolSearchContacts(t *testing.T) {
 
 func TestUnknownToolIsErrorResult(t *testing.T) {
 	s := newTestServer(&fakeMesh{})
-	out := callTool(t, s, "no_such_tool", nil)
+	conn := s.NewConn()
+	out := callTool(t, conn, "no_such_tool", nil)
 	if tr := resultTool(t, out); !tr.IsError {
 		t.Errorf("unknown tool should be isError=true: %+v", out)
 	}
 }
 
-// callTool runs a tools/call through HandleMessage and returns its raw result JSON.
-func callTool(t *testing.T, s *Server, name string, args map[string]any) []byte {
+// callTool runs a tools/call through Conn.Handle and returns its raw result JSON.
+func callTool(t *testing.T, c *Conn, name string, args map[string]any) []byte {
 	t.Helper()
 	req := map[string]any{"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := s.HandleMessage(raw)
+	out := c.Handle(raw)
 	if out == nil {
 		t.Fatal("tools/call produced no response")
 	}

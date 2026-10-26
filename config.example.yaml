@@ -1,12 +1,36 @@
 # meshcore-mcp-gateway configuration — see README.md for the full docs.
 # Copy to config.yaml next to the binary and edit. Unknown sections are
 # ignored, so a config.yaml shared with other family apps keeps working.
+#
+# The gateway needs at least one transport: MCP (xiaozhi.me dial-out),
+# Transports.http (generic MCP hosts attach by URL) or Transports.stdio.
 
+# Transport 1: xiaozhi.me voice assistant (dials OUT to the access point,
+# so no inbound ports are needed).
 MCP:
   # The agent's MCP access point URL from the xiaozhi.me console
-  # (agent → MCP 设置 / 获取 MCP 接入点). The bridge dials OUT to it, so no
-  # inbound ports are needed.
+  # (agent → MCP 设置 / 获取 MCP 接入点).
   endpoint_url: "https://api.xiaozhi.me/mcp/?token=XXXX"
+
+# Transport 2: Streamable HTTP for generic MCP hosts — nanobot, Hermes,
+# any client that takes a server URL. Several hosts can connect at once;
+# each keeps its own read cursor.
+Transports:
+  http:
+    enabled: true
+    listen: "127.0.0.1:8788"  # non-loopback listen requires a token
+    # path: "/mcp"             # default
+    # token: "shared-secret"   # required when listen is not loopback; no TLS —
+                              # use Tailscale / a reverse proxy over a network
+  # Transport 3: stdio — newline-delimited JSON-RPC on stdin/stdout, for
+  # hosts that spawn the gateway as a subprocess (or run with -stdio).
+  # stdio:
+  #   enabled: false
+
+# Output shaping for text agents.
+Output:
+  # max_message_runes: 200    # per-message truncation in mesh_get_new_messages;
+                              # raise for text agents that read full messages
 
 Connection:
   type: "bt"               # "bt" (Bluetooth LE, default) or "serial"
@@ -14,8 +38,8 @@ Connection:
   # serial_baud: 115200
   channel_transmissions: 3 # max transmissions per channel message (default 3)
 
-Shrink:                    # how voice messages are fitted to the mesh
+Shrink:                    # how outgoing messages are fitted to the mesh
   cyr_to_lat: true         # squeeze Cyrillic to identical-looking Latin (saves bytes)
   # max_bytes: 140         # hard mesh limit
   # overrides:
-  #   xiaozhi: split       # voice already defaults to split; override if you like
+  #   xiaozhi: split       # voice path already defaults to split; override if you like

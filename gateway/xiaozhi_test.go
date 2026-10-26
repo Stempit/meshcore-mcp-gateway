@@ -1,4 +1,4 @@
-package xiaozhi
+package gateway
 
 import (
 	"context"
@@ -13,10 +13,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// TestSessionKeepsAliveWithPings runs the session against a local WebSocket
-// server with shortened keep-alive periods and verifies the client actually
-// sends pings (which keep NAT mappings warm in production).
-func TestSessionKeepsAliveWithPings(t *testing.T) {
+// TestXiaozhiSessionKeepsAliveWithPings runs the session against a local
+// WebSocket server with shortened keep-alive periods and verifies the client
+// actually sends pings (which keep NAT mappings warm in production).
+func TestXiaozhiSessionKeepsAliveWithPings(t *testing.T) {
 	oldPing, oldPong := pingPeriod, pongWait
 	pingPeriod, pongWait = 40*time.Millisecond, 300*time.Millisecond
 	defer func() { pingPeriod, pongWait = oldPing, oldPong }()
@@ -45,13 +45,18 @@ func TestSessionKeepsAliveWithPings(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sess, err := NewSession("ws"+strings.TrimPrefix(srv.URL, "http"), newTestServer(&fakeMesh{}), testLogger())
+	sess, err := NewXiaozhiSession("ws"+strings.TrimPrefix(srv.URL, "http"), newTestServer(&fakeMesh{}), testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go sess.Run(ctx)
+	// Wait for the session goroutine to fully exit before the test's other
+	// defers restore the package-level keep-alive periods it keeps reading.
+	done := make(chan struct{})
+	go func() {
+		sess.Run(ctx)
+		close(done)
+	}()
 
 	select {
 	case <-connected:
@@ -62,4 +67,6 @@ func TestSessionKeepsAliveWithPings(t *testing.T) {
 	if got := atomic.LoadInt32(&pings); got < 2 {
 		t.Errorf("server saw %d pings in 300ms with a %v period, want ≥2", got, pingPeriod)
 	}
+	cancel()
+	<-done
 }

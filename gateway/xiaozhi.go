@@ -1,4 +1,4 @@
-package xiaozhi
+package gateway
 
 import (
 	"context"
@@ -31,19 +31,19 @@ const (
 	stableAfter  = 60 * time.Second
 )
 
-// Session manages the outbound WebSocket connection to the xiaozhi.me MCP
-// access point: dial, serve JSON-RPC frames until the connection drops, then
-// reconnect with exponential backoff until the context is cancelled.
-type Session struct {
+// XiaozhiSession manages the outbound WebSocket connection to the xiaozhi.me
+// MCP access point: dial, serve JSON-RPC frames until the connection drops,
+// then reconnect with exponential backoff until the context is cancelled.
+type XiaozhiSession struct {
 	endpoint string
 	server   *Server
 	log      *slog.Logger
 }
 
-// NewSession builds a Session for the access-point URL from the xiaozhi.me
-// console. The console prints an https:// URL; the https/http schemes are
-// normalized to wss/ws for the WebSocket dial.
-func NewSession(endpoint string, server *Server, logger *slog.Logger) (*Session, error) {
+// NewXiaozhiSession builds a XiaozhiSession for the access-point URL from
+// the xiaozhi.me console. The console prints an https:// URL; the https/http
+// schemes are normalized to wss/ws for the WebSocket dial.
+func NewXiaozhiSession(endpoint string, server *Server, logger *slog.Logger) (*XiaozhiSession, error) {
 	endpoint = strings.TrimSpace(endpoint)
 	switch {
 	case strings.HasPrefix(endpoint, "https://"):
@@ -55,12 +55,12 @@ func NewSession(endpoint string, server *Server, logger *slog.Logger) (*Session,
 	if err != nil || (u.Scheme != "ws" && u.Scheme != "wss") {
 		return nil, fmt.Errorf("invalid MCP endpoint URL %q", endpoint)
 	}
-	return &Session{endpoint: endpoint, server: server, log: logger}, nil
+	return &XiaozhiSession{endpoint: endpoint, server: server, log: logger}, nil
 }
 
 // EndpointSafe returns the endpoint URL with any token query parameter
 // redacted, for logging.
-func (s *Session) EndpointSafe() string {
+func (s *XiaozhiSession) EndpointSafe() string {
 	u, err := url.Parse(s.endpoint)
 	if err != nil {
 		return "(unparseable endpoint)"
@@ -70,7 +70,7 @@ func (s *Session) EndpointSafe() string {
 }
 
 // Run connects and serves until ctx is cancelled, reconnecting with backoff.
-func (s *Session) Run(ctx context.Context) {
+func (s *XiaozhiSession) Run(ctx context.Context) {
 	backoff := backoffStart
 	for {
 		started := time.Now()
@@ -100,7 +100,7 @@ func (s *Session) Run(ctx context.Context) {
 // connectAndServe dials the access point and pumps frames until an error or
 // ctx cancellation. The dial-out direction is what makes this work behind
 // NAT: xiaozhi.me never connects to us.
-func (s *Session) connectAndServe(ctx context.Context) error {
+func (s *XiaozhiSession) connectAndServe(ctx context.Context) error {
 	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
 	conn, resp, err := dialer.DialContext(ctx, s.endpoint, nil)
 	if err != nil {
@@ -149,13 +149,17 @@ func (s *Session) connectAndServe(ctx context.Context) error {
 
 	s.log.Info("Connected to MCP access point", "endpoint", s.EndpointSafe())
 
+	// One MCP client connection per WebSocket connection: the read cursor
+	// resumes from the cloud's saved position (by clientInfo.name), so a
+	// reconnect does not re-deliver what was already read.
+	client := s.server.NewConn()
 	for {
 		conn.SetReadDeadline(time.Now().Add(pongWait))
 		_, data, err := conn.ReadMessage()
 		if err != nil {
 			return err
 		}
-		if out := s.server.HandleMessage(data); out != nil {
+		if out := client.Handle(data); out != nil {
 			conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := conn.WriteMessage(websocket.TextMessage, out); err != nil {
 				return err

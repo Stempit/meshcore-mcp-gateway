@@ -1,4 +1,4 @@
-package xiaozhi
+package gateway
 
 import (
 	"encoding/hex"
@@ -17,7 +17,7 @@ import (
 // to a known contact or channel.
 var ErrUnknownRecipient = errors.New("recipient not found")
 
-// Mesh is the radio side of the voice tools. It exists so the MCP layer is
+// Mesh is the radio side of the MCP tools. It exists so the MCP layer is
 // independent of how the mesh is reached: DirectMesh serves it from a local
 // meshcore client + inbox (no HTTP gateway involved); tests provide a fake.
 type Mesh interface {
@@ -61,7 +61,7 @@ type DirectMeshOptions struct {
 	ChannelTransmissions int
 }
 
-// NewDirectMesh builds the local radio backend for the voice tools.
+// NewDirectMesh builds the local radio backend for the MCP tools.
 func NewDirectMesh(client *meshcore.MeshCoreClient, inbox *companion.Inbox, opts DirectMeshOptions) *DirectMesh {
 	return &DirectMesh{client: client, inbox: inbox, opts: opts}
 }

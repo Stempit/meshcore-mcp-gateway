@@ -9,18 +9,47 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// config is the bridge's own config.yaml — a subset of the family format:
-// the MCP section (the xiaozhi.me access point), the Connection section
-// (transport) and the Shrink keys that shape voice sends. Unknown sections
-// are ignored, so a combined config.yaml shared with other family apps keeps
-// working.
+// config is the gateway's own config.yaml — a subset of the family format:
+// the MCP section (the xiaozhi.me access point), the Transports section
+// (local listeners for generic MCP hosts), the Connection section
+// (transport to the radio) and the Shrink keys that shape sends. Unknown
+// sections are ignored, so a combined config.yaml shared with other family
+// apps keeps working.
 type config struct {
 	MCP struct {
 		// EndpointURL is the agent's MCP access point from the xiaozhi.me
 		// console — the bridge dials OUT to it over WebSocket, so no inbound
-		// ports are needed.
+		// ports are needed. Optional: the gateway runs with any combination
+		// of the transports below.
 		EndpointURL string `yaml:"endpoint_url"`
 	} `yaml:"MCP"`
+
+	Transports struct {
+		HTTP struct {
+			// Enabled turns on the Streamable HTTP listener that generic
+			// MCP hosts (nanobot, hermes, …) attach to.
+			Enabled bool `yaml:"enabled"`
+			// Listen is the host:port to bind. Default 127.0.0.1:8788.
+			Listen string `yaml:"listen"`
+			// Path is the MCP endpoint path. Default /mcp.
+			Path string `yaml:"path"`
+			// Token is the bearer token hosts must present. Required when
+			// Listen is not a loopback address.
+			Token string `yaml:"token"`
+		} `yaml:"http"`
+		Stdio struct {
+			// Enabled serves newline-delimited JSON-RPC on stdin/stdout —
+			// for hosts that spawn the gateway as a subprocess. The -stdio
+			// flag forces this on regardless.
+			Enabled bool `yaml:"enabled"`
+		} `yaml:"stdio"`
+	} `yaml:"Transports"`
+
+	Output struct {
+		// MaxMessageRunes caps each message quoted by mesh_get_new_messages
+		// (default 200). Raise it for text agents that read full messages.
+		MaxMessageRunes int `yaml:"max_message_runes"`
+	} `yaml:"Output"`
 
 	Connection struct {
 		// Type selects the transport: "bt" (Bluetooth LE, default) or "serial" (USB/UART).
@@ -44,7 +73,7 @@ type config struct {
 }
 
 // loadConfig reads and parses the config file. A missing file is an error:
-// without the endpoint URL there is nothing to dial.
+// without a config there is nothing to dial or listen on.
 func loadConfig(path string) (*config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

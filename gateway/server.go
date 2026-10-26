@@ -1,15 +1,17 @@
-package xiaozhi
+package gateway
 
-// JSON-RPC 2.0 / Model Context Protocol wire handling for the xiaozhi.me MCP
-// access point. The cloud is the MCP client: after the bridge dials out, it
-// sends "initialize", then "tools/list" / "tools/call"; the bridge responds.
-// Only the handful of MCP methods a tool server needs are implemented.
+// JSON-RPC 2.0 / Model Context Protocol wire handling, shared by every
+// transport (the xiaozhi.me dial-out WebSocket, Streamable HTTP, stdio).
+// The client — whichever it is — sends "initialize", then "tools/list" /
+// "tools/call"; the gateway responds. Only the handful of MCP methods a
+// tool server needs are implemented.
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 
@@ -50,46 +52,108 @@ type contentItem struct {
 	Text string `json:"text"`
 }
 
-// Voice shaping limits: how much one answer may contain.
+// Output shaping limits: how much one answer may contain. The defaults keep
+// a voice reply short; text agents may raise the per-message rune cap via
+// the Output config section.
 const (
-	maxVoiceBatch     = 10 // messages per mesh_get_new_messages call
-	maxVoiceTextRunes = 200
-	maxVoiceListItems = 30 // names per contacts listing
+	maxBatchMessages       = 10 // messages per mesh_get_new_messages call
+	defaultMaxMessageRunes = 200
+	maxListItems           = 30 // names per contacts listing
 )
 
-// Server serves the meshcore voice tools to xiaozhi.me. It is
-// transport-agnostic: the WebSocket session feeds frames to HandleMessage and
-// writes back what comes out. The radio side is whatever Mesh implementation
-// it was built with; Fit is the resolved fitting policy for voice sends.
+// Server holds the state shared by every connected MCP client: the radio
+// backend, the send-fitting policy and the per-client read cursors. Each
+// client connection gets its own Conn from NewConn. It is
+// transport-agnostic: a transport feeds frames to Conn.Handle and writes
+// back what comes out. The radio side is whatever Mesh implementation it
+// was built with; Fit is the resolved fitting policy for sends.
 type Server struct {
 	mesh Mesh
 	log  *slog.Logger
 	Fit  fit.Options
 
-	// cursorMu guards cursor, the last message ID the voice tool has read.
-	// The cursor is process-wide (not per connection): the voice assistant is
-	// one reader, and it must not lose its place across reconnects.
-	cursorMu sync.Mutex
-	cursor   int64
+	maxMessageRunes int
+
+	// cursorsMu guards cursors, the last message ID each named client has
+	// read (keyed by the clientInfo.name sent in initialize). A client that
+	// reconnects resumes where it left off; the map is in-memory only, so a
+	// restart starts everyone at "now" — the retained backlog is not
+	// replayed.
+	cursorsMu sync.Mutex
+	cursors   map[string]int64
 }
 
-// NewServer builds a Server whose voice cursor starts at initialCursor —
-// pass the inbox's LastID at bridge startup so only NEW messages are read
-// aloud (0 reads the whole retained backlog). fitOpts is the voice send
-// policy: split into [i/N] parts by default (see the composition root, which resolves
-// it from the Shrink config section with the "xiaozhi" built-in default).
-func NewServer(mesh Mesh, initialCursor int64, fitOpts fit.Options, logger *slog.Logger) *Server {
-	return &Server{mesh: mesh, cursor: initialCursor, Fit: fitOpts, log: logger}
+// ServerOptions configures a Server.
+type ServerOptions struct {
+	// Fit is the policy for fitting outgoing sends to the mesh limit
+	// (split into [i/N] parts by default).
+	Fit fit.Options
+	// MaxMessageRunes caps each message quoted by mesh_get_new_messages
+	// (default 200). Raise it for text agents that read full messages.
+	MaxMessageRunes int
 }
 
-// HandleMessage processes one incoming JSON-RPC frame and returns the response
-// bytes, or nil for notifications (which get no response). Tool calls run
-// synchronously — a blocking radio send holds the frame loop for tens of
-// seconds, which is fine for a single-agent voice session.
-func (s *Server) HandleMessage(data []byte) []byte {
+// NewServer builds a Server serving the mesh tools through the given radio
+// backend. See ServerOptions for the knobs.
+func NewServer(mesh Mesh, opts ServerOptions, logger *slog.Logger) *Server {
+	if opts.MaxMessageRunes <= 0 {
+		opts.MaxMessageRunes = defaultMaxMessageRunes
+	}
+	return &Server{
+		mesh:            mesh,
+		Fit:             opts.Fit,
+		maxMessageRunes: opts.MaxMessageRunes,
+		cursors:         make(map[string]int64),
+		log:             logger,
+	}
+}
+
+// NewConn starts one MCP client connection. Its read cursor begins at "now"
+// — the backlog that predates the connection is not replayed — unless the
+// client is already known from an earlier connection, in which case its
+// initialize resumes the saved cursor.
+func (s *Server) NewConn() *Conn {
+	return &Conn{srv: s, cursor: s.nowCursor()}
+}
+
+// nowCursor returns the newest inbox ID: the "no backlog" starting point.
+func (s *Server) nowCursor() int64 {
+	_, last := s.mesh.MessagesSince(math.MaxInt64)
+	return last
+}
+
+func (s *Server) savedCursor(client string) (int64, bool) {
+	s.cursorsMu.Lock()
+	defer s.cursorsMu.Unlock()
+	cur, ok := s.cursors[client]
+	return cur, ok
+}
+
+func (s *Server) saveCursor(client string, cur int64) {
+	s.cursorsMu.Lock()
+	defer s.cursorsMu.Unlock()
+	if cur > s.cursors[client] {
+		s.cursors[client] = cur
+	}
+}
+
+// Conn is one MCP client connection: its identity (the clientInfo.name from
+// initialize) and its private read cursor. Handle is safe for concurrent
+// use — an HTTP session may issue tool calls in parallel.
+type Conn struct {
+	srv    *Server
+	client string
+
+	mu     sync.Mutex
+	cursor int64
+}
+
+// Handle processes one incoming JSON-RPC frame and returns the response
+// bytes, or nil for notifications (which get no response).
+func (c *Conn) Handle(data []byte) []byte {
 	var req rpcRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		s.log.Warn("Unparseable MCP frame", "error", err, "bytes", len(data))
+		c.srv.log.Warn("Unparseable MCP frame", "error", err, "bytes", len(data))
 		return nil // no ID to correlate; drop
 	}
 	if req.Method == "" {
@@ -97,22 +161,22 @@ func (s *Server) HandleMessage(data []byte) []byte {
 	}
 	// JSON-RPC notification = absent or null id → never respond.
 	if isNotification(req.ID) {
-		s.log.Debug("MCP notification", "method", req.Method)
+		c.srv.log.Debug("MCP notification", "method", req.Method)
 		return nil
 	}
 
 	switch req.Method {
 	case "initialize":
-		return marshalResponse(req.ID, s.handleInitialize(req.Params), nil)
+		return marshalResponse(req.ID, c.handleInitialize(req.Params), nil)
 	case "tools/list":
 		return marshalResponse(req.ID, map[string]any{"tools": ToolDefinitions()}, nil)
 	case "tools/call":
-		result := s.handleToolsCall(req.Params)
+		result := c.handleToolsCall(req.Params)
 		return marshalResponse(req.ID, result, nil)
 	case "ping":
 		return marshalResponse(req.ID, map[string]any{}, nil)
 	default:
-		s.log.Warn("Unsupported MCP method", "method", req.Method)
+		c.srv.log.Warn("Unsupported MCP method", "method", req.Method)
 		return marshalResponse(req.ID, nil, &rpcError{Code: -32601, Message: "method not found: " + req.Method})
 	}
 }
@@ -129,15 +193,25 @@ func marshalResponse(id json.RawMessage, result any, rerr *rpcError) []byte {
 	return b
 }
 
-// handleInitialize echoes the client's requested protocol version and
-// declares the tools capability.
-func (s *Server) handleInitialize(params json.RawMessage) map[string]any {
+// handleInitialize echoes the client's requested protocol version, declares
+// the tools capability, and adopts the client's identity: a known client
+// resumes its saved cursor, a new one keeps the connection-time cursor.
+func (c *Conn) handleInitialize(params json.RawMessage) map[string]any {
 	var p struct {
 		ProtocolVersion string `json:"protocolVersion"`
+		ClientInfo      struct {
+			Name string `json:"name"`
+		} `json:"clientInfo"`
 	}
 	_ = json.Unmarshal(params, &p)
 	if p.ProtocolVersion == "" {
 		p.ProtocolVersion = "2024-11-05"
+	}
+	if name := strings.TrimSpace(p.ClientInfo.Name); name != "" {
+		c.client = name
+		if saved, ok := c.srv.savedCursor(name); ok {
+			c.setCursor(saved)
+		}
 	}
 	return map[string]any{
 		"protocolVersion": p.ProtocolVersion,
@@ -149,7 +223,7 @@ func (s *Server) handleInitialize(params json.RawMessage) map[string]any {
 // handleToolsCall dispatches a tools/call. Per the MCP spec, tool failures
 // (unreachable radio, bad recipient) are SUCCESS results with isError=true —
 // the LLM reads them and can tell the user what went wrong.
-func (s *Server) handleToolsCall(params json.RawMessage) any {
+func (c *Conn) handleToolsCall(params json.RawMessage) any {
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -162,20 +236,20 @@ func (s *Server) handleToolsCall(params json.RawMessage) any {
 	var isErr bool
 	switch p.Name {
 	case "mesh_get_new_messages":
-		text, isErr = s.toolGetMessages()
+		text, isErr = c.toolGetMessages()
 	case "mesh_send_message":
-		text, isErr = s.toolSend(p.Arguments)
+		text, isErr = c.toolSend(p.Arguments)
 	case "mesh_search_contacts":
-		text, isErr = s.toolSearchContacts(p.Arguments)
+		text, isErr = c.toolSearchContacts(p.Arguments)
 	case "mesh_list_contacts":
-		text, isErr = s.toolContacts()
+		text, isErr = c.toolContacts()
 	case "mesh_list_channels":
-		text, isErr = s.toolChannels()
+		text, isErr = c.toolChannels()
 	default:
 		text, isErr = fmt.Sprintf("Unknown tool: %s", p.Name), true
 	}
 	if isErr {
-		s.log.Info("Tool call failed", "tool", p.Name, "result", text)
+		c.srv.log.Info("Tool call failed", "tool", p.Name, "result", text)
 	}
 	return toolResult{Content: []contentItem{{Type: "text", Text: text}}, IsError: isErr}
 }
@@ -189,29 +263,51 @@ func truncate(s string, max int) string {
 	return string(r[:max]) + "…"
 }
 
-// toolGetMessages reads the next batch of unread messages through the inbox
-// cursor and formats them for speech. The cursor advances only through what
-// was returned, so a caller pages through a large backlog by asking again.
-func (s *Server) toolGetMessages() (string, bool) {
-	s.cursorMu.Lock()
-	after := s.cursor
-	s.cursorMu.Unlock()
+func (c *Conn) getCursor() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cursor
+}
 
-	msgs, _ := s.mesh.MessagesSince(after)
+func (c *Conn) setCursor(cur int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.cursor = cur
+}
+
+// advanceCursor moves the connection cursor (and the saved per-client one)
+// forward to last, never backward.
+func (c *Conn) advanceCursor(last int64) {
+	c.mu.Lock()
+	if last > c.cursor {
+		c.cursor = last
+	}
+	c.mu.Unlock()
+	c.srv.saveCursor(c.client, last)
+}
+
+// toolGetMessages reads the next batch of unread messages through the
+// connection's inbox cursor and formats them for the reply. The cursor
+// advances only through what was returned, so a caller pages through a
+// large backlog by asking again.
+func (c *Conn) toolGetMessages() (string, bool) {
+	after := c.getCursor()
+
+	msgs, _ := c.srv.mesh.MessagesSince(after)
 	if len(msgs) == 0 {
 		return "No new mesh messages.", false
 	}
 
 	shown := msgs
 	more := 0
-	if len(msgs) > maxVoiceBatch {
-		shown, more = msgs[:maxVoiceBatch], len(msgs)-maxVoiceBatch
+	if len(msgs) > maxBatchMessages {
+		shown, more = msgs[:maxBatchMessages], len(msgs)-maxBatchMessages
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d new mesh message(s):", len(shown))
 	for i, m := range shown {
-		text := truncate(m.Text, maxVoiceTextRunes)
+		text := truncate(m.Text, c.srv.maxMessageRunes)
 		switch m.Type {
 		case "dm":
 			fmt.Fprintf(&b, "\n%d. Private from %s: %q", i+1, m.Sender, text)
@@ -229,14 +325,9 @@ func (s *Server) toolGetMessages() (string, bool) {
 		fmt.Fprintf(&b, "\n(%d more — read the rest by asking again)", more)
 	}
 
-	// Advance the cursor only through what was shown, keeping the rest of the
-	// backlog for the next call.
-	s.cursorMu.Lock()
-	if last := shown[len(shown)-1].ID; last > s.cursor {
-		s.cursor = last
-	}
-	s.cursorMu.Unlock()
-
+	// Advance the cursor only through what was shown, keeping the rest of
+	// the backlog for the next call.
+	c.advanceCursor(shown[len(shown)-1].ID)
 	return b.String(), false
 }
 
@@ -251,8 +342,8 @@ type sendRequest struct {
 // toolSend validates arguments, fits the text to the mesh (the server's Fit
 // policy: split into [i/N] parts by default, optional Cyrillic→Latin squeeze
 // via its CyrToLat option), sends every part, and maps the distinct failure
-// modes onto speech the user can act on.
-func (s *Server) toolSend(args json.RawMessage) (string, bool) {
+// modes onto text the agent can act on.
+func (c *Conn) toolSend(args json.RawMessage) (string, bool) {
 	var req sendRequest
 	if err := json.Unmarshal(args, &req); err != nil {
 		return "Invalid arguments: " + err.Error(), true
@@ -266,15 +357,15 @@ func (s *Server) toolSend(args json.RawMessage) (string, bool) {
 		return `Type must be "dm" or "channel".`, true
 	}
 
-	parts := fit.Fit(s.Fit, "", []string{req.Text})
+	parts := fit.Fit(c.srv.Fit, "", []string{req.Text})
 	sent := 0
 	var err error
 	for _, part := range parts {
 		switch req.Type {
 		case "dm":
-			err = s.mesh.SendDM(req.To, part, req.Ack)
+			err = c.srv.mesh.SendDM(req.To, part, req.Ack)
 		case "channel":
-			err = s.mesh.SendChannel(req.To, part, req.Ack)
+			err = c.srv.mesh.SendChannel(req.To, part, req.Ack)
 		}
 		if err != nil {
 			break // stop at the first failure; report exactly what got through
@@ -295,12 +386,13 @@ func (s *Server) toolSend(args json.RawMessage) (string, bool) {
 	return failure, true
 }
 
-// sendFailureText renders a radio-side send error as a speakable sentence.
+// sendFailureText renders a radio-side send error as a sentence the calling
+// agent can relay and act on.
 func sendFailureText(to string, err error) string {
 	var amb *meshcore.AmbiguousMatchError
 	switch {
 	case errors.As(err, &amb):
-		return fmt.Sprintf("Several recipients match %q: %s. Say the full name.", to, strings.Join(amb.Names, ", "))
+		return fmt.Sprintf("Several recipients match %q: %s. Use the full name.", to, strings.Join(amb.Names, ", "))
 	case errors.Is(err, ErrUnknownRecipient):
 		return fmt.Sprintf("Recipient %q not found. Use mesh_list_contacts or mesh_list_channels to check names.", to)
 	case errors.Is(err, meshcore.ErrNoConfirmation):
@@ -312,23 +404,23 @@ func sendFailureText(to string, err error) string {
 	}
 }
 
-func (s *Server) toolContacts() (string, bool) {
-	names := s.mesh.Contacts()
+func (c *Conn) toolContacts() (string, bool) {
+	names := c.srv.mesh.Contacts()
 	if len(names) == 0 {
 		return "No contacts are known yet.", false
 	}
-	if len(names) > maxVoiceListItems {
+	if len(names) > maxListItems {
 		return fmt.Sprintf("%d known contacts, first %d: %s. And %d more.",
-			len(names), maxVoiceListItems,
-			strings.Join(names[:maxVoiceListItems], ", "), len(names)-maxVoiceListItems), false
+			len(names), maxListItems,
+			strings.Join(names[:maxListItems], ", "), len(names)-maxListItems), false
 	}
 	return fmt.Sprintf("Known contacts (%d): %s.", len(names), strings.Join(names, ", ")), false
 }
 
-// toolSearchContacts answers mesh_search_contacts: all names matching a fragment.
-// With a large contact book this is how the assistant finds one recipient
-// without reading out the whole list.
-func (s *Server) toolSearchContacts(args json.RawMessage) (string, bool) {
+// toolSearchContacts answers mesh_search_contacts: all names matching a
+// fragment. With a large contact book this is how the agent finds one
+// recipient without listing the whole directory.
+func (c *Conn) toolSearchContacts(args json.RawMessage) (string, bool) {
 	var p struct {
 		Query string `json:"query"`
 	}
@@ -337,10 +429,10 @@ func (s *Server) toolSearchContacts(args json.RawMessage) (string, bool) {
 	}
 	p.Query = strings.TrimSpace(p.Query)
 	if p.Query == "" {
-		return "Say a name (or part of it) to search for.", true
+		return "Provide a name (or part of it) to search for.", true
 	}
 
-	names := s.mesh.SearchContacts(p.Query)
+	names := c.srv.mesh.SearchContacts(p.Query)
 	if len(names) == 0 {
 		return fmt.Sprintf("No contacts match %q.", p.Query), false
 	}
@@ -351,16 +443,16 @@ func (s *Server) toolSearchContacts(args json.RawMessage) (string, bool) {
 	}
 	shown := names
 	var more string
-	if len(names) > maxVoiceListItems {
-		shown = names[:maxVoiceListItems]
-		more = fmt.Sprintf(" And %d more — refine the search.", len(names)-maxVoiceListItems)
+	if len(names) > maxListItems {
+		shown = names[:maxListItems]
+		more = fmt.Sprintf(" And %d more — refine the search.", len(names)-maxListItems)
 	}
 	return fmt.Sprintf("%d %s %s %q: %s.%s",
 		len(names), noun, verb, p.Query, strings.Join(shown, ", "), more), false
 }
 
-func (s *Server) toolChannels() (string, bool) {
-	refs := s.mesh.Channels()
+func (c *Conn) toolChannels() (string, bool) {
+	refs := c.srv.mesh.Channels()
 	if len(refs) == 0 {
 		return "No channels are configured.", false
 	}
