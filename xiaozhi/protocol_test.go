@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stempit/meshcore-companion/companion"
-	"github.com/stempit/meshcore-companion/fit"
+	"github.com/stempit/meshcore-kit/companion"
+	"github.com/stempit/meshcore-kit/fit"
 	"github.com/stempit/meshcore-go"
 )
 

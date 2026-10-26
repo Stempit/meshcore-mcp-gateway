@@ -106,7 +106,7 @@ Run them at different times, or put a second radio on the desk.)
   lists them and asks you to say the full name.
 - **Sends are mesh-fitted.** Outgoing voice messages pass through the same
   `fit` package (from
-  [meshcore-companion](https://github.com/stempit/meshcore-companion)) as
+  [meshcore-kit](https://github.com/stempit/meshcore-kit)) as
   every bot send. By default a message longer than the mesh limit is **split**
   into sequenced `[i/N]` parts, sent one after another (each takes up to ~30 s
   of radio time). With `Shrink.cyr_to_lat: true` Cyrillic is first squeezed to
@@ -137,7 +137,7 @@ WebSocket + reconnect), `xiaozhi/protocol.go` (JSON-RPC/MCP wire handling +
 tool implementations), `xiaozhi/mesh.go` (`Mesh` interface + direct device
 backend), `xiaozhi/tools.go` (tool descriptors). The device runtime (connect,
 startup sync, inbox, keepalive) comes from
-[meshcore-companion](https://github.com/stempit/meshcore-companion); the
+[meshcore-kit](https://github.com/stempit/meshcore-kit); the
 protocol driver from [meshcore-go](https://github.com/stempit/meshcore-go).
 
 ## License

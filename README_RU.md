@@ -99,7 +99,7 @@ go run .
 
 - **Отправки подгоняются под эфир.** Исходящие голосовые сообщения проходят
   через тот же пакет `fit` (из
-  [meshcore-companion](https://github.com/stempit/meshcore-companion)), что и
+  [meshcore-kit](https://github.com/stempit/meshcore-kit)), что и
   все отправки бота. По умолчанию сообщение длиннее лимита эфира **делится**
   на части с маркерами `[i/N]`, которые уходят одна за другой (каждая — до
   ~30 с эфира). С `Shrink.cyr_to_lat: true` кириллица сначала сжимается в
@@ -138,7 +138,7 @@ WebSocket и переподключение), `xiaozhi/protocol.go` (JSON-RPC/MC
 реализация инструментов), `xiaozhi/mesh.go` (интерфейс `Mesh` + прямой бэкенд
 к устройству), `xiaozhi/tools.go` (описания инструментов). Рантайм устройства
 (подключение, стартовая синхронизация, инбокс, keepalive) — из
-[meshcore-companion](https://github.com/stempit/meshcore-companion); драйвер
+[meshcore-kit](https://github.com/stempit/meshcore-kit); драйвер
 протокола — [meshcore-go](https://github.com/stempit/meshcore-go).
 
 ## Лицензия

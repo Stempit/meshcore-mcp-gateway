@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/stempit/meshcore-companion/fit"
+	"github.com/stempit/meshcore-kit/fit"
 	"gopkg.in/yaml.v3"
 )
 

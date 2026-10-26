@@ -17,7 +17,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/stempit/meshcore-companion/companion"
+	"github.com/stempit/meshcore-kit/companion"
 	"github.com/stempit/meshcore-mcp-gateway/xiaozhi"
 )
 

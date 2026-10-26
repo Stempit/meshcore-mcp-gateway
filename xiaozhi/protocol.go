@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/stempit/meshcore-companion/fit"
+	"github.com/stempit/meshcore-kit/fit"
 	"github.com/stempit/meshcore-go"
 )
 
