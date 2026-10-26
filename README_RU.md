@@ -89,7 +89,7 @@ go run .
 ### Одно приложение на устройство
 
 Мост подключается к компаньону напрямую. Не запускайте его на **том же
-физическом устройстве**, что [meshbot](https://github.com/stempit/meshbot)
+физическом устройстве**, что [meshcore-go-bot](https://github.com/stempit/meshcore-go-bot)
 или [HTTP-шлюз](https://github.com/stempit/meshcore-http-gateway)
 одновременно — MeshCore-компаньон обслуживает одно BLE/serial-соединение.
 Разные устройства — пожалуйста. (Нужны и HTTP API, и голос на одной рации?

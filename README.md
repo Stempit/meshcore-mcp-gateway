@@ -89,7 +89,7 @@ Now just talk to your XiaoZhi device.
 ### One app per device
 
 The bridge attaches to the companion device directly. Don't run it against
-the **same physical device** as [meshbot](https://github.com/stempit/meshbot)
+the **same physical device** as [meshcore-go-bot](https://github.com/stempit/meshcore-go-bot)
 or the [HTTP gateway](https://github.com/stempit/meshcore-http-gateway) at
 the same time — a MeshCore companion serves one BLE/serial connection.
 Different devices are fine. (Need both the HTTP API and voice on one radio?

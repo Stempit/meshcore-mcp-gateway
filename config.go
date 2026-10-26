@@ -60,7 +60,7 @@ func loadConfig(path string) (*config, error) {
 // voiceFitOptions resolves the voice-send policy. The "xiaozhi" override wins
 // when set to a known variant; otherwise the built-in default is Split — a
 // voice assistant reading a truncated reply loses its ending. Mirrors the
-// resolution meshbot's shrink layer applies to the "xiaozhi" path.
+// resolution meshcore-go-bot's shrink layer applies to the "xiaozhi" path.
 func (c *config) voiceFitOptions() fit.Options {
 	v := fit.Split
 	if o, ok := c.Shrink.Overrides["xiaozhi"]; ok {
