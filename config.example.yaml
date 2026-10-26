@@ -1,0 +1,21 @@
+# meshcore-mcp-gateway configuration — see README.md for the full docs.
+# Copy to config.yaml next to the binary and edit. Unknown sections are
+# ignored, so a config.yaml shared with other family apps keeps working.
+
+MCP:
+  # The agent's MCP access point URL from the xiaozhi.me console
+  # (agent → MCP 设置 / 获取 MCP 接入点). The bridge dials OUT to it, so no
+  # inbound ports are needed.
+  endpoint_url: "https://api.xiaozhi.me/mcp/?token=XXXX"
+
+Connection:
+  type: "bt"               # "bt" (Bluetooth LE, default) or "serial"
+  # serial_port: "/dev/ttyUSB0"   # when type: "serial"
+  # serial_baud: 115200
+  channel_transmissions: 3 # max transmissions per channel message (default 3)
+
+Shrink:                    # how voice messages are fitted to the mesh
+  cyr_to_lat: true         # squeeze Cyrillic to identical-looking Latin (saves bytes)
+  # max_bytes: 140         # hard mesh limit
+  # overrides:
+  #   xiaozhi: split       # voice already defaults to split; override if you like

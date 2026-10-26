@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/stempit/meshcore-kit/fit"
 	"github.com/stempit/meshcore-go"
+	"github.com/stempit/meshcore-kit/fit"
 )
 
 // rpcRequest is an incoming JSON-RPC request or notification.

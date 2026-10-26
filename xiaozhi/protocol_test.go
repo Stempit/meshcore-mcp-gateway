@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stempit/meshcore-go"
 	"github.com/stempit/meshcore-kit/companion"
 	"github.com/stempit/meshcore-kit/fit"
-	"github.com/stempit/meshcore-go"
 )
 
 // voiceFit mirrors the default voice policy — split into [i/N] parts, the
