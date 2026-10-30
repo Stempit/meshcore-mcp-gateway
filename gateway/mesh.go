@@ -98,10 +98,7 @@ func (m *DirectMesh) SendChannel(to, text string, ack bool) error {
 	if ch == nil {
 		return fmt.Errorf("%w: %s", ErrUnknownRecipient, to)
 	}
-	transmissions := m.opts.ChannelTransmissions
-	if transmissions <= 0 {
-		transmissions = 3
-	}
+	transmissions := max(m.opts.ChannelTransmissions, 3)
 	return m.client.SendChannelMessageWithRetry(ch, text, ack, 1, transmissions, sendTimeoutPerTry)
 }
 
