@@ -208,7 +208,7 @@ func (c *Conn) handleInitialize(params json.RawMessage) map[string]any {
 		p.ProtocolVersion = "2024-11-05"
 	}
 	if name := strings.TrimSpace(p.ClientInfo.Name); name != "" {
-		c.client = name
+		c.setClient(name)
 		if saved, ok := c.srv.savedCursor(name); ok {
 			c.setCursor(saved)
 		}
@@ -275,6 +275,14 @@ func (c *Conn) setCursor(cur int64) {
 	c.cursor = cur
 }
 
+// setClient adopts the client identity under the same mutex as the cursor —
+// Handle may run initialize concurrently with tool calls.
+func (c *Conn) setClient(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.client = name
+}
+
 // advanceCursor moves the connection cursor (and the saved per-client one)
 // forward to last, never backward.
 func (c *Conn) advanceCursor(last int64) {
@@ -282,8 +290,9 @@ func (c *Conn) advanceCursor(last int64) {
 	if last > c.cursor {
 		c.cursor = last
 	}
+	client := c.client
 	c.mu.Unlock()
-	c.srv.saveCursor(c.client, last)
+	c.srv.saveCursor(client, last)
 }
 
 // toolGetMessages reads the next batch of unread messages through the

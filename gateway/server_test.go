@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stempit/meshcore-go"
@@ -477,6 +479,40 @@ func TestUnknownToolIsErrorResult(t *testing.T) {
 	if tr := resultTool(t, out); !tr.IsError {
 		t.Errorf("unknown tool should be isError=true: %+v", out)
 	}
+}
+
+// streamingMesh hands out a fresh message on every read so cursor advancement
+// never runs dry — enough to keep parallel reads and re-initializes churning.
+type streamingMesh struct {
+	fakeMesh
+	n atomic.Int64
+}
+
+func (m *streamingMesh) MessagesSince(after int64) ([]companion.Message, int64) {
+	id := m.n.Add(1)
+	return []companion.Message{{ID: id, Type: "dm", Sender: "S", Text: "x"}}, id
+}
+
+// TestHandleIsSafeForConcurrentUse exercises the documented contract: a Conn
+// may serve a re-initialize and tool reads in parallel. Run with -race: this
+// is the regression test for the unguarded Conn.client access.
+func TestHandleIsSafeForConcurrentUse(t *testing.T) {
+	s := newTestServer(&streamingMesh{fakeMesh: fakeMesh{}})
+	conn := s.NewConn()
+	call := []byte(`{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"mesh_get_new_messages"}}`)
+
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				conn.Handle(initializeFrame("hermes"))
+				conn.Handle(call)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // callTool runs a tools/call through Conn.Handle and returns its raw result JSON.
