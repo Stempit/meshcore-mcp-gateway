@@ -11,7 +11,8 @@ work for any MCP host — [nanobot](https://github.com/nanobot-ai/nanobot),
 own agent — from one gateway, one radio.
 
 It is a **standalone feature**: the gateway opens its own connection to the
-MeshCore device (BLE or USB serial, the `Connection` config section) and
+MeshCore device (BLE, USB serial or TCP over Wi-Fi/Ethernet, the `Connection`
+config section) and
 needs nothing else — not the HTTP gateway, not the bot.
 
 ## Transports
@@ -78,9 +79,12 @@ all transports):
 ```yaml
 # config.yaml (subset of the family format; unknown sections are ignored)
 Connection:
-  type: "bt"             # "bt" (BLE, default) or "serial"
+  type: "bt"             # "bt" (BLE, default), "serial" or "tcp" (Wi-Fi/Ethernet)
   # serial_port: "/dev/ttyUSB0"
   # serial_baud: 115200
+  # tcp_address: "192.168.1.50"   # when type: "tcp" — host or host:port (default 5000)
+  # device_name: "MeshCore-AB12"  # when type: "bt" — pick one device by advertised name
+  # device_address: "AA:BB:CC:DD:EE:FF"  # when type: "bt" — or by platform address
   channel_transmissions: 3
 
 Shrink:                  # how outgoing messages are fitted to the mesh
@@ -177,7 +181,7 @@ same radio — prefer one gateway with HTTP and point the agents at it.
 | `Transports.http.token` | — | Bearer token clients must present |
 | `Transports.stdio.enabled` | `false` | Serve newline-delimited JSON-RPC on stdin/stdout (also: `-stdio` flag) |
 | `Output.max_message_runes` | `200` | Per-message truncation in `mesh_get_new_messages` — raise for text agents |
-| `Connection.*` | — | Which MeshCore device to attach to, and how |
+| `Connection.*` | — | Which MeshCore device to attach to, and how — BLE (with optional name/address selection), USB serial or TCP |
 | `Shrink.*` | voice path defaults to `split` | Outgoing-message fitting — see the behavior notes below |
 
 Flags: `-config <path>` (default `./config.yaml`), `-stdio`.
