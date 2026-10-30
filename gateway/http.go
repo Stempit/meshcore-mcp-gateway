@@ -92,9 +92,6 @@ func isLoopbackHost(host string) bool {
 	return h == "localhost" || h == "127.0.0.1" || h == "::1" || strings.HasPrefix(h, "127.")
 }
 
-// ListenAddr is the configured listen address.
-func (t *HTTPTransport) ListenAddr() string { return t.listen }
-
 // Addr is the resolved bind address — meaningful after Run has bound the
 // listener (a configured port of 0 gets replaced by the real port).
 func (t *HTTPTransport) Addr() string {
