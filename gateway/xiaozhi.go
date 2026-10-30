@@ -89,10 +89,7 @@ func (s *XiaozhiSession) Run(ctx context.Context) {
 		if time.Since(started) >= stableAfter {
 			backoff = backoffStart
 		} else {
-			backoff *= 2
-			if backoff > backoffMax {
-				backoff = backoffMax
-			}
+			backoff = min(backoff*2, backoffMax)
 		}
 	}
 }
