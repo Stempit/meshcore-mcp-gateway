@@ -104,7 +104,9 @@ func (t *HTTPTransport) Addr() string {
 func (t *HTTPTransport) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(t.path, t.handle)
-	httpSrv := &http.Server{Handler: mux} // no read timeout: a tool call may block ~30s
+	// ReadHeaderTimeout bounds slow-header clients; body reads stay unbounded
+	// on purpose: a tool call may block ~30s.
+	httpSrv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
 	ln, err := net.Listen("tcp", t.listen)
 	if err != nil {
