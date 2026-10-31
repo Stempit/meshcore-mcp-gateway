@@ -4,8 +4,8 @@ go 1.27.1
 
 require (
 	github.com/gorilla/websocket v1.5.3
-	github.com/stempit/meshcore-go v0.1.0
-	github.com/stempit/meshcore-kit v0.1.0
+	github.com/stempit/meshcore-go v0.2.0
+	github.com/stempit/meshcore-kit v0.2.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
